@@ -24,8 +24,8 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -53,7 +53,7 @@ jobs:
         platform: [linux/amd64, linux/arm64]
     runs-on: ${{ matrix.platform == 'linux/arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: 计算架构短名与 tar 文件名
         id: names
@@ -66,7 +66,7 @@ jobs:
 
       # 单架构导出为本地 docker tar 包（type=docker），无需登录任何 registry
       - id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: ${{ matrix.platform }}
@@ -76,7 +76,7 @@ jobs:
           outputs: type=docker,dest=${{ steps.names.outputs.tar }}
 
       - name: 上传 tar 包
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.names.outputs.tar }}
           path: ${{ steps.names.outputs.tar }}
