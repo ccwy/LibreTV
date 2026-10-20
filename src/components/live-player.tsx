@@ -13,7 +13,7 @@ import { ART_DEFAULT_CONTROL_HIDE_MS, TOUCH_CONTROL_HIDE_MS } from '@/lib/contro
  *   mp4/webm 等原生容器 → <video> 直接播放；
  * - 无扩展名的地址（如 /channel/xxx?token=...）默认按 HLS 处理，
  *   HLS 直连与代理均失败后**回退原生播放**一次（覆盖"内容是 MP4 却无 .m3u8 后缀"的源）；
- * - 每级直连失败自动切换到 /api/live/stream 代理通道重试一次；
+ * - 默认经 /api/live/stream 代理通道播放，代理失败自动回退直连重试一次；
  * - 直播态 UI：无进度条、无倍速、无截图、无连播。
  */
 
@@ -42,7 +42,7 @@ function proxyUrl(url: string): string {
 }
 
 interface LivePlayerProps {
-  /** 上游直播流地址（直连优先，失败自动走代理） */
+  /** 上游直播流地址（代理优先，失败自动回退直连） */
   url: string;
   title: string;
   /** 上一台/下一台：传入时注册为播放器控制条按钮（全屏内也可操作） */
@@ -115,12 +115,12 @@ export function LivePlayer({ url, title, onPrevChannel, onNextChannel }: LivePla
     /**
      * 原生播放：mp4/webm 等容器交给 <video> 直接播放。
      * 也作为 HLS 两级都失败后的兜底——覆盖"地址没有 .m3u8 后缀但内容其实是 MP4"的源。
-     * 直连失败（CORS/混合内容）时再走一次代理。
+     * 失败时自动切换到另一通道（代理↔直连）重试一次。
      */
     const setupNative = (
       video: HTMLVideoElement,
       mediaUrl: string,
-      allowProxyFallback: boolean,
+      allowFallback: boolean,
       failMessage?: string
     ) => {
       cleanupEngines();
@@ -128,9 +128,14 @@ export function LivePlayer({ url, title, onPrevChannel, onNextChannel }: LivePla
         video.removeEventListener('error', onError);
         nativeCleanup = null;
         if (disposed || destroyed) return;
-        if (allowProxyFallback && !mediaUrl.startsWith(STREAM_PROXY_PREFIX)) {
-          showHint('直连失败，改用代理重试...');
-          setupNative(video, proxyUrl(url), false, failMessage);
+        if (allowFallback) {
+          if (mediaUrl.startsWith(STREAM_PROXY_PREFIX)) {
+            showHint('代理失败，改用直连重试...');
+            setupNative(video, url, false, failMessage);
+          } else {
+            showHint('直连失败，改用代理重试...');
+            setupNative(video, proxyUrl(url), false, failMessage);
+          }
           return;
         }
         setError(failMessage || '该地址不是可播放的直播流（内容可能是文件或错误提示）');
@@ -192,16 +197,15 @@ export function LivePlayer({ url, title, onPrevChannel, onNextChannel }: LivePla
         }
         if (!playbackStarted) {
           if (
-            stage === 'direct' &&
-            !mediaUrl.startsWith(STREAM_PROXY_PREFIX) &&
+            stage === 'proxy' &&
+            mediaUrl.startsWith(STREAM_PROXY_PREFIX) &&
             (data.details === 'manifestLoadError' || data.type === Hls.ErrorTypes.NETWORK_ERROR)
           ) {
-            showHint('直连失败，改用代理重试...');
-            // 直播 manifest 重写需要本站前缀，交给代理通道
-            setupHls(video, proxyUrl(url), 'proxy');
+            showHint('代理失败，改用直连重试...');
+            setupHls(video, url, 'direct');
             return;
           }
-          // HLS 直连与代理均失败：可能是"无 .m3u8 后缀但内容是 MP4"的源，回退原生播放
+          // HLS 代理与直连均失败：可能是"无 .m3u8 后缀但内容是 MP4"的源，回退原生播放
           showHint('HLS 解析失败，尝试原生播放...');
           setupNative(video, url, true, `直播流加载失败${codeHint}，可能该频道已失效，请尝试其他频道`);
           return;
@@ -221,7 +225,7 @@ export function LivePlayer({ url, title, onPrevChannel, onNextChannel }: LivePla
     const setupFlv = async (
       video: HTMLVideoElement,
       mediaUrl: string,
-      allowProxyFallback: boolean
+      allowFallback: boolean
     ) => {
       cleanupEngines();
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -256,9 +260,14 @@ export function LivePlayer({ url, title, onPrevChannel, onNextChannel }: LivePla
       player.load();
       player.on(Mpegts.Events.ERROR, (errType: string) => {
         if (disposed || destroyed) return;
-        if (!playbackStarted && allowProxyFallback && !mediaUrl.startsWith(STREAM_PROXY_PREFIX)) {
-          showHint('直连失败，改用代理重试...');
-          void setupFlv(video, proxyUrl(url), false);
+        if (!playbackStarted && allowFallback) {
+          if (mediaUrl.startsWith(STREAM_PROXY_PREFIX)) {
+            showHint('代理失败，改用直连重试...');
+            void setupFlv(video, url, false);
+          } else {
+            showHint('直连失败，改用代理重试...');
+            void setupFlv(video, proxyUrl(url), false);
+          }
           return;
         }
         setError(`直播流加载失败（${errType}），请尝试其他频道`);
@@ -267,6 +276,8 @@ export function LivePlayer({ url, title, onPrevChannel, onNextChannel }: LivePla
     };
 
     const engine = engineOf(url);
+    // 默认代理优先：url 已是本站代理地址时原样使用（防二次代理），否则包装为代理地址
+    const proxiedUrl = url.startsWith(STREAM_PROXY_PREFIX) ? url : proxyUrl(url);
     // 上一台/下一台：注册到播放器控制条（普通态与全屏均可见），未传不显示
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const controls: any[] = [];
@@ -324,13 +335,13 @@ export function LivePlayer({ url, title, onPrevChannel, onNextChannel }: LivePla
       moreVideoAttr: { playsInline: true },
       customType: {
         m3u8: (video: HTMLVideoElement) => {
-          setupHls(video, url, 'direct');
+          setupHls(video, proxiedUrl, 'proxy');
         },
         flv: (video: HTMLVideoElement) => {
-          void setupFlv(video, url, true);
+          void setupFlv(video, proxiedUrl, true);
         },
         mp4: (video: HTMLVideoElement) => {
-          setupNative(video, url, true);
+          setupNative(video, proxiedUrl, true);
         },
       },
     });
